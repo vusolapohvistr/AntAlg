@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use rand::Rng;
 use std::f64::MAX;
 use std::thread;
-use std::sync::{Mutex};
+use std::sync::{Mutex, Arc};
 use std::thread::JoinHandle;
 
 struct Config {
@@ -152,20 +152,20 @@ fn get_possibly_shortest_way_sync(weight_mat: &Vec<Vec<f64>>, config: &Config, s
     (answer, min_way)
 }
 
-fn get_possibly_shortest_way_threads(weight_mat: Vec<Vec<f64>>, config: Config, start_point: i32, targets: Vec<i32>) -> (Vec<usize>, f64) {
+fn get_possibly_shortest_way_threads(weight_mat: Vec<Vec<f64>>, config: &'static Config, start_point: i32, targets: Vec<i32>) -> (Vec<usize>, f64) {
     let answer = Mutex::new(Vec::new());
     let min_way = Mutex::new(MAX);
     let mut pheromones_mat = vec![vec![1.0; weight_mat.len()]; weight_mat.len()];
-    let mut ants: &'static Vec<Mutex<Ant>>= &mut Vec::new();
+    let mut ants: &'static Vec<Arc<Mutex<Ant>>> = &mut Vec::new();
     for _ in 0..config.ant_num {
-        ants.push(Mutex::new(Ant::new(&config)));
+        (*ants).push(Arc::new(Mutex::new(Ant::new(&config))));
     }
 
     for _ in 0..config.iters {
         let mut tds: Vec<JoinHandle<()>> = Vec::new();
         vaporize_pheromones(&mut pheromones_mat, &config);
         for mut ant in ants {
-            let td = thread::spawn(|| {
+            let td = thread::spawn(move || {
                 let mut ant = ant.lock().unwrap();
             });
             /* (*ant).go(start_point, &targets, &weight_mat, &pheromones_mat);
@@ -175,7 +175,7 @@ fn get_possibly_shortest_way_threads(weight_mat: Vec<Vec<f64>>, config: Config, 
             } */
         }
         for td in tds {
-            td.join();
+            td.join().unwrap_or_default();
         }
         for ant in ants {
             (*ant.lock().unwrap()).change_pheromones_mat(&mut pheromones_mat);
@@ -198,7 +198,7 @@ fn main() {
         targets.push(target);
     }
 
-    let config = Config {
+    let config: &'static Config = &Config {
         alfa: 0.7,
         beta: 0.3,
         ant_capacity: 1000.0,
