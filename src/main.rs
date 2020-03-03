@@ -3,6 +3,9 @@ use std::env;
 use std::collections::HashMap;
 use rand::Rng;
 use std::f64::MAX;
+use std::thread;
+use std::sync::{Mutex};
+use std::thread::JoinHandle;
 
 struct Config {
     alfa: f64,
@@ -27,7 +30,7 @@ trait AntInterface {
           weight_mat: &Vec<Vec<f64>>,
           pheromones_mat: &Vec<Vec<f64>>);
     fn change_pheromones_mat(&mut self, pheromones_matrix: &mut Vec<Vec<f64>>);
-    fn is_all_targets_visited(&self, visited_targets_counter: &HashMap<i32, i32>) -> bool;
+    fn is_all_targets_visited(&self, visited_targets_counter: &HashMap<usize, i32>) -> bool;
 }
 
 impl Ant<'_> {
@@ -52,15 +55,16 @@ impl AntInterface for Ant<'_> {
 
         let mut visited_targets_counter = HashMap::new();
         for target in targets {
-            visited_targets_counter.insert(*target, 0);
+            visited_targets_counter.insert(*target as usize, 0);
         }
 
         let mut rand = rand::thread_rng();
 
-        while self.is_all_targets_visited(&visited_targets_counter) == false {
+        while !self.is_all_targets_visited(&visited_targets_counter)
+            || (self.is_all_targets_visited(&visited_targets_counter) && *self.path.last().unwrap() != start_point as usize) {
             let mut balance_sum = 0.0;
             for i in 0..weight_mat.len() {
-                if weight_mat[current_pos][i].eq(&0.0) || self.path.contains(&i) {
+                if weight_mat[current_pos][i].eq(&0.0) {
                     continue;
                 }
                 balance_sum += pheromones_mat[current_pos][i].powf(self.config.alfa)
@@ -73,7 +77,8 @@ impl AntInterface for Ant<'_> {
             }
 
             for i in 0..weight_mat.len() {
-                if weight_mat[current_pos][i] == 0.0 || self.path.contains(&i) {
+                if weight_mat[current_pos][i].eq(&0.0)
+                    || (self.path.len() > 1 && i == self.path[self.path.len() - 2]) {
                     continue;
                 }
                 let prob_to_move: f64 = pheromones_mat[current_pos][i].powf(self.config.alfa) *
@@ -82,9 +87,8 @@ impl AntInterface for Ant<'_> {
                 let random_number: f64 = rand.gen();
                 if random_number < prob_to_move {
                     self.path.push(i);
-                    match visited_targets_counter.get(&(i as i32)) {
-                        Some(mut v) => v = &(v + 1),
-                        None => {}
+                    if let Some(v) = visited_targets_counter.get(&i) {
+                        visited_targets_counter.insert(i, *v + 1);
                     }
                     self.total_way += weight_mat[current_pos][i];
                     current_pos = i;
@@ -93,7 +97,6 @@ impl AntInterface for Ant<'_> {
             }
         }
     }
-
 
     fn change_pheromones_mat(&mut self, pheromones_matrix: &mut Vec<Vec<f64>>) {
         if self.cant_find_way == false {
@@ -106,7 +109,7 @@ impl AntInterface for Ant<'_> {
         self.path.clear();
     }
 
-    fn is_all_targets_visited(&self, visited_targets_counter: &HashMap<i32, i32>) -> bool {
+    fn is_all_targets_visited(&self, visited_targets_counter: &HashMap<usize, i32>) -> bool {
         for v in visited_targets_counter.values() {
             if *v == 0 {
                 return false
@@ -117,28 +120,28 @@ impl AntInterface for Ant<'_> {
 }
 
 fn vaporize_pheromones(pheromones_mat: &mut Vec<Vec<f64>>, config: &Config) {
-    for mut i in pheromones_mat.iter() {
+    for i in pheromones_mat.iter() {
         for mut g in i.iter() {
             g = &(g * (1.0 - config.ro));
         }
     }
 }
 
-fn get_possibly_shortest_way_sync(weight_mat: &mut Vec<Vec<f64>>, config: &Config, start_point: i32, targets: &Vec<i32>) -> Vec<usize> {
+fn get_possibly_shortest_way_sync(weight_mat: &Vec<Vec<f64>>, config: &Config, start_point: i32, targets: &Vec<i32>) -> (Vec<usize>, f64) {
     let mut answer: Vec<usize> = Vec::new();
+    let mut min_way = MAX;
     let mut pheromones_mat = vec![vec![1.0; weight_mat.len()]; weight_mat.len()];
     let mut ants: Vec<Ant> = Vec::new();
-    for i in 0..config.ant_num {
+    for _ in 0..config.ant_num {
         ants.push(Ant::new(&config));
     }
 
-    for i in 0..config.iters {
-        let mut min_total_way = MAX;
+    for _ in 0..config.iters {
         vaporize_pheromones(&mut pheromones_mat, &config);
         for ant in &mut ants {
             ant.go(start_point, &targets, &weight_mat, &pheromones_mat);
-            if ant.total_way < min_total_way {
-                min_total_way = ant.total_way;
+            if ant.total_way < min_way {
+                min_way = ant.total_way;
                 answer = ant.path.clone();
             }
         }
@@ -146,7 +149,42 @@ fn get_possibly_shortest_way_sync(weight_mat: &mut Vec<Vec<f64>>, config: &Confi
             ant.change_pheromones_mat(&mut pheromones_mat);
         }
     }
-    answer
+    (answer, min_way)
+}
+
+fn get_possibly_shortest_way_threads(weight_mat: Vec<Vec<f64>>, config: Config, start_point: i32, targets: Vec<i32>) -> (Vec<usize>, f64) {
+    let answer = Mutex::new(Vec::new());
+    let min_way = Mutex::new(MAX);
+    let mut pheromones_mat = vec![vec![1.0; weight_mat.len()]; weight_mat.len()];
+    let mut ants: &'static Vec<Mutex<Ant>>= &mut Vec::new();
+    for _ in 0..config.ant_num {
+        ants.push(Mutex::new(Ant::new(&config)));
+    }
+
+    for _ in 0..config.iters {
+        let mut tds: Vec<JoinHandle<()>> = Vec::new();
+        vaporize_pheromones(&mut pheromones_mat, &config);
+        for mut ant in ants {
+            let td = thread::spawn(|| {
+                let mut ant = ant.lock().unwrap();
+            });
+            /* (*ant).go(start_point, &targets, &weight_mat, &pheromones_mat);
+            if (*ant).total_way < *min_way.lock().unwrap() {
+                *min_way.lock().unwrap() = (*ant).total_way;
+                *answer.lock().unwrap() = (*ant).path.clone();
+            } */
+        }
+        for td in tds {
+            td.join();
+        }
+        for ant in ants {
+            (*ant.lock().unwrap()).change_pheromones_mat(&mut pheromones_mat);
+        }
+    }
+
+    let answer= (*answer.lock().unwrap()).clone();
+    let min_way = *min_way.lock().unwrap();
+    (answer, min_way)
 }
 
 fn main() {
@@ -161,12 +199,12 @@ fn main() {
     }
 
     let config = Config {
-        alfa: 0.4,
-        beta: 0.6,
-        ant_capacity: 100.0,
-        ro: 0.05,
-        ant_num: 5,
-        iters: 5
+        alfa: 0.7,
+        beta: 0.3,
+        ant_capacity: 1000.0,
+        ro: 0.3,
+        ant_num: 50,
+        iters: 10
     };
 
     let mut weight_mat: Vec<Vec<f64>> = Vec::new();
@@ -180,6 +218,6 @@ fn main() {
         weight_mat.push(temp_vec);
     }
 
-    let answer = get_possibly_shortest_way_sync(&mut weight_mat, &config, targets[0], &targets);
-    println!("{:?}", answer);
+    let (answer, min_way) = get_possibly_shortest_way_threads(weight_mat, config, targets[0], targets);
+    println!("path: {:?}, total_way: {}", answer, min_way);
 }
