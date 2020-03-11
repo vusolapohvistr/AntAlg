@@ -6,7 +6,6 @@ use std::f64::MAX;
 use std::thread;
 use std::sync::{Mutex, Arc};
 use std::thread::JoinHandle;
-use std::ops::Deref;
 
 struct Config {
     alfa: f64,
@@ -158,7 +157,7 @@ fn get_possibly_shortest_way_threads(weight_mat: Vec<Vec<f64>>, config: &'static
     let targets = Arc::new(targets);
     let answer = Arc::new(Mutex::new(Vec::new()));
     let min_way = Arc::new(Mutex::new(MAX));
-    let mut pheromones_mat = Arc::new(Mutex::new(vec![vec![1.0; weight_mat.len()]; weight_mat.len()]));
+    let pheromones_mat = Arc::new(Mutex::new(vec![vec![1.0; weight_mat.len()]; weight_mat.len()]));
     let mut ants: Vec<Mutex<Ant>> =  Vec::new();
     for _ in 0..config.ant_num {
         ants.push(Mutex::new(Ant::new(&config)));
