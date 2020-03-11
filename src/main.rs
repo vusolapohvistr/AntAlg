@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use rand::Rng;
 use std::f64::MAX;
 use std::thread;
-use std::sync::{Mutex, Arc};
+use std::sync::{Mutex, Arc, mpsc};
 use std::thread::JoinHandle;
+use std::cmp::min;
+use std::sync::mpsc::{Sender, Receiver};
 
 struct Config {
     alfa: f64,
@@ -201,6 +203,64 @@ fn get_possibly_shortest_way_threads(weight_mat: Vec<Vec<f64>>, config: &'static
     (answer, min_way)
 }
 
+fn get_possibly_shortest_way_channels(weight_mat: Vec<Vec<f64>>, config: &'static Config, start_point: i32, targets: Vec<i32>) -> (Vec<usize>, f64) {
+    let weight_mat = Arc::new(weight_mat);
+    let targets = Arc::new(targets);
+    let answer = Arc::new(Mutex::new(Vec::new()));
+    let min_way = Arc::new(Mutex::new(MAX));
+    let mut pheromones_mat =  Arc::new(Mutex::new(vec![vec![1.0; weight_mat.len()]; weight_mat.len()]));
+    let mut ants =  Vec::new();
+    for _ in 0..config.ant_num {
+        ants.push(Ant::new(&config));
+    }
+
+    let (tx, rx): (Sender<Ant>, Receiver<Ant>) = mpsc::channel();
+
+    for _ in 0..config.iters {
+        let mut pheromones_mat = &mut *pheromones_mat.lock().unwrap();
+        vaporize_pheromones(&mut pheromones_mat, &config);
+        let mut received_ants = Vec::new();
+        let mut tds: Vec<JoinHandle<()>> = Vec::new();
+        for _ in 0..config.ant_num {
+            let pheromones_mat = pheromones_mat.clone();
+            let weight_mat = weight_mat.clone();
+            let targets = targets.clone();
+            let min_way = min_way.clone();
+            let answer = answer.clone();
+            let mut ant = ants.pop().unwrap();
+            let thread_tx = tx.clone();
+            let td = thread::spawn(move || {
+                ant.go(start_point, &targets, &weight_mat, &pheromones_mat);
+                if ant.total_way < *min_way.lock().unwrap() {
+                    *min_way.lock().unwrap() = ant.total_way;
+                    *answer.lock().unwrap() = ant.path.clone();
+                }
+                thread_tx.send(ant).unwrap();
+            });
+            tds.push(td);
+        }
+
+        for _ in 0..config.ant_num {
+            received_ants.push(rx.recv().unwrap());
+        }
+
+        for td in tds {
+            td.join().unwrap_or_default();
+        }
+
+        for ant in &mut received_ants {
+            ant.change_pheromones_mat(&mut pheromones_mat);
+        }
+
+        ants = received_ants;
+    }
+
+    let answer= (*answer.lock().unwrap()).clone();
+    let min_way = *min_way.lock().unwrap();
+
+    (answer, min_way)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let file_path = &args[1];
@@ -232,6 +292,8 @@ fn main() {
         weight_mat.push(temp_vec);
     }
 
-    let (answer, min_way) = get_possibly_shortest_way_threads(weight_mat, config, targets[0], targets);
+    let (answer, min_way) = get_possibly_shortest_way_channels(weight_mat, config, targets[0], targets);
     println!("path: {:?}, total_way: {}", answer, min_way);
 }
+
+
