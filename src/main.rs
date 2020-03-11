@@ -6,6 +6,7 @@ use std::f64::MAX;
 use std::thread;
 use std::sync::{Mutex, Arc};
 use std::thread::JoinHandle;
+use std::ops::Deref;
 
 struct Config {
     alfa: f64,
@@ -76,7 +77,7 @@ impl AntInterface for Ant<'_> {
                 break;
             }
 
-            for i in 0..weight_mat.len() {
+            for mut i in 0..weight_mat.len() {
                 if weight_mat[current_pos][i].eq(&0.0)
                     || (self.path.len() > 1 && i == self.path[self.path.len() - 2]) {
                     continue;
@@ -87,7 +88,7 @@ impl AntInterface for Ant<'_> {
                 let random_number: f64 = rand.gen();
                 if random_number < prob_to_move {
                     self.path.push(i);
-                    if let Some(v) = visited_targets_counter.get(&i) {
+                    if let Some(v) = visited_targets_counter.get(&mut i) {
                         visited_targets_counter.insert(i, *v + 1);
                     }
                     self.total_way += weight_mat[current_pos][i];
@@ -127,7 +128,7 @@ fn vaporize_pheromones(pheromones_mat: &mut Vec<Vec<f64>>, config: &Config) {
     }
 }
 
-fn get_possibly_shortest_way_sync(weight_mat: &Vec<Vec<f64>>, config: &Config, start_point: i32, targets: &Vec<i32>) -> (Vec<usize>, f64) {
+fn get_possibly_shortest_way_sync(weight_mat: Vec<Vec<f64>>, config: &Config, start_point: i32, targets: Vec<i32>) -> (Vec<usize>, f64) {
     let mut answer: Vec<usize> = Vec::new();
     let mut min_way = MAX;
     let mut pheromones_mat = vec![vec![1.0; weight_mat.len()]; weight_mat.len()];
@@ -153,31 +154,45 @@ fn get_possibly_shortest_way_sync(weight_mat: &Vec<Vec<f64>>, config: &Config, s
 }
 
 fn get_possibly_shortest_way_threads(weight_mat: Vec<Vec<f64>>, config: &'static Config, start_point: i32, targets: Vec<i32>) -> (Vec<usize>, f64) {
-    let answer = Mutex::new(Vec::new());
-    let min_way = Mutex::new(MAX);
-    let mut pheromones_mat = vec![vec![1.0; weight_mat.len()]; weight_mat.len()];
-    let mut ants: &'static Vec<Arc<Mutex<Ant>>> = &mut Vec::new();
+    let weight_mat = Arc::new(weight_mat);
+    let targets = Arc::new(targets);
+    let answer = Arc::new(Mutex::new(Vec::new()));
+    let min_way = Arc::new(Mutex::new(MAX));
+    let mut pheromones_mat = Arc::new(Mutex::new(vec![vec![1.0; weight_mat.len()]; weight_mat.len()]));
+    let mut ants: Vec<Mutex<Ant>> =  Vec::new();
     for _ in 0..config.ant_num {
-        (*ants).push(Arc::new(Mutex::new(Ant::new(&config))));
+        ants.push(Mutex::new(Ant::new(&config)));
     }
+
+    let ants = Arc::new(ants);
 
     for _ in 0..config.iters {
         let mut tds: Vec<JoinHandle<()>> = Vec::new();
+        let mut pheromones_mat = &mut *pheromones_mat.lock().unwrap();
         vaporize_pheromones(&mut pheromones_mat, &config);
-        for mut ant in ants {
+        for i in 0..ants.len() {
+            let ants_ref_copy = ants.clone();
+            let pheromones_mat = pheromones_mat.clone();
+            let weight_mat = weight_mat.clone();
+            let targets = targets.clone();
+            let min_way = min_way.clone();
+            let answer = answer.clone();
             let td = thread::spawn(move || {
-                let mut ant = ant.lock().unwrap();
+                let ant = &ants_ref_copy[i];
+                let ant = &mut *ant.lock().unwrap();
+                ant.go(start_point, &targets, &weight_mat, &pheromones_mat);
+                if ant.total_way < *min_way.lock().unwrap() {
+                    *min_way.lock().unwrap() = ant.total_way;
+                    *answer.lock().unwrap() = ant.path.clone();
+                }
             });
-            /* (*ant).go(start_point, &targets, &weight_mat, &pheromones_mat);
-            if (*ant).total_way < *min_way.lock().unwrap() {
-                *min_way.lock().unwrap() = (*ant).total_way;
-                *answer.lock().unwrap() = (*ant).path.clone();
-            } */
+            tds.push(td);
         }
         for td in tds {
             td.join().unwrap_or_default();
         }
-        for ant in ants {
+        for i in 0..ants.len() {
+            let ant = &ants[i];
             (*ant.lock().unwrap()).change_pheromones_mat(&mut pheromones_mat);
         }
     }
