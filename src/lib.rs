@@ -4,13 +4,10 @@ pub mod ants_algs {
     use rand::Rng;
     use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
     use std::collections::{HashMap, HashSet};
-    use std::f64::MAX;
-    use std::iter::{repeat, FromIterator};
-    use std::num::NonZeroUsize;
+    use std::iter::FromIterator;
     use std::sync::mpsc::{Receiver, Sender};
-    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::mpsc;
     use std::thread;
-    use std::thread::JoinHandle;
 
     pub struct Config {
         pub alfa: f64,
@@ -118,7 +115,7 @@ pub mod ants_algs {
         targets: Vec<i32>,
     ) -> (Vec<usize>, f64) {
         let mut answer: Vec<usize> = Vec::new();
-        let mut min_way = MAX;
+        let mut min_way = f64::MAX;
         let mut pheromones_mat = vec![vec![1.0; weight_mat.len()]; weight_mat.len()];
         let mut ants: Vec<Ant> = vec![Ant::new(config); config.ant_num as usize];
 
@@ -147,7 +144,7 @@ pub mod ants_algs {
         targets: Vec<i32>,
     ) -> (Vec<usize>, f64) {
         let mut answer: Vec<usize> = Vec::new();
-        let mut min_way = MAX;
+        let mut min_way = f64::MAX;
         let mut pheromones_mat = vec![vec![1.0; weight_mat.len()]; weight_mat.len()];
         let mut ants: Vec<Ant> = vec![Ant::new(config); config.ant_num as usize];
 
@@ -176,62 +173,48 @@ pub mod ants_algs {
         start_point: i32,
         targets: Vec<i32>,
     ) -> (Vec<usize>, f64) {
-        let weight_mat = Arc::new(weight_mat);
-        let targets = Arc::new(targets);
-        let answer = Arc::new(Mutex::new(Vec::new()));
-        let min_way = Arc::new(Mutex::new(MAX));
-        let pheromones_mat = Arc::new(Mutex::new(vec![
-            vec![1.0; weight_mat.len()];
-            weight_mat.len()
-        ]));
-        let mut ants = Vec::new();
-        for _ in 0..config.ant_num {
-            ants.push(Ant::new(&config));
-        }
+        let mut answer: Vec<usize> = Vec::new();
+        let mut min_way = f64::MAX;
+        let mut pheromones_mat = vec![vec![1.0; weight_mat.len()]; weight_mat.len()];
+        let mut ants: Vec<Ant> = vec![Ant::new(config); config.ant_num as usize];
 
         let (tx, rx): (Sender<Ant>, Receiver<Ant>) = mpsc::channel();
 
         for _ in 0..config.iters {
-            let mut pheromones_mat = &mut *pheromones_mat.lock().unwrap();
-            vaporize_pheromones(&mut pheromones_mat, &config);
+            vaporize_pheromones(&mut pheromones_mat, config);
             let mut received_ants = Vec::new();
-            let mut tds: Vec<JoinHandle<()>> = Vec::new();
-            for _ in 0..config.ant_num {
-                let pheromones_mat = pheromones_mat.clone();
-                let weight_mat = weight_mat.clone();
-                let targets = targets.clone();
-                let min_way = min_way.clone();
-                let answer = answer.clone();
-                let mut ant = ants.pop().unwrap();
-                let thread_tx = tx.clone();
-                let td = thread::spawn(move || {
-                    ant.go(start_point, &targets, &weight_mat, &pheromones_mat);
-                    if ant.total_way < *min_way.lock().unwrap() {
-                        *min_way.lock().unwrap() = ant.total_way;
-                        *answer.lock().unwrap() = ant.path.clone();
+
+            thread::scope(|scope| {
+                let mut tds = Vec::with_capacity(ants.len());
+
+                for mut ant in ants.into_iter() {
+                    let td = scope.spawn(|| {
+                        ant.go(start_point, &targets, &weight_mat, &pheromones_mat);
+                        tx.send(ant).unwrap();
+                    });
+                    tds.push(td);
+                }
+
+                for _ in 0..config.ant_num {
+                    let ant = rx.recv().unwrap();
+                    if ant.total_way < min_way {
+                        min_way = ant.total_way;
+                        answer = ant.path.clone();
                     }
-                    thread_tx.send(ant).unwrap();
-                });
-                tds.push(td);
-            }
+                    received_ants.push(ant);
+                }
 
-            for _ in 0..config.ant_num {
-                received_ants.push(rx.recv().unwrap());
-            }
-
-            for td in tds {
-                td.join().unwrap_or_default();
-            }
+                for td in tds {
+                    td.join().unwrap_or_default();
+                }
+            });
 
             for ant in &mut received_ants {
-                ant.change_pheromones_mat(pheromones_mat);
+                ant.change_pheromones_mat(&mut pheromones_mat);
             }
 
             ants = received_ants;
         }
-
-        let answer = (*answer.lock().unwrap()).clone();
-        let min_way = *min_way.lock().unwrap();
 
         (answer, min_way)
     }
